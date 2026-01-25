@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "colav-controllers"
+dynamic = ["version"]
+description = "Ship navigation controllers for prescribed-time heading control and COLREGs-compliant collision avoidance"
+readme = "README.md"
+requires-python = ">=3.8"
+keywords = ["navigation", "control", "colregs", "collision-avoidance", "ship"]
+authors = [
+  { name = "Michael Stolberger", email = "stolbergermichael5@gmail.com" },
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: Implementation :: CPython",
+]
+dependencies = [
+  "numpy>=1.20",
+]
+
+[project.urls]
+Source = "https://github.com/michaelstolberger27/colav-controllers"
+
+[tool.hatch.version]
+path = "src/colav_controllers/__about__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/colav_controllers"]
