@@ -28,7 +28,8 @@ class CollisionAvoidanceController:
         vertex_provider: Optional[Callable[
             [float, float, List[Tuple[float, float, float, float]], float],
             Optional[List[Tuple[float, float]]]
-        ]] = None
+        ]] = None,
+        v1_buffer: float = 0.0
     ):
         """
         Args:
@@ -40,6 +41,8 @@ class CollisionAvoidanceController:
             vertex_provider: Optional callable that returns unsafe set vertices.
                 Signature: (pos_x, pos_y, obstacles_list, Cs) -> List[(vx, vy)] or None
                 If None, uses simple circular obstacle approximation.
+            v1_buffer: Buffer distance (m) to offset V1 to starboard for extra clearance.
+                Default 0.0 means no buffer.
         """
         self.a = a
         self.v = v
@@ -47,6 +50,7 @@ class CollisionAvoidanceController:
         self.tp = tp
         self.Cs = Cs
         self.vertex_provider = vertex_provider or self._default_vertex_provider
+        self.v1_buffer = v1_buffer
         self.virtual_waypoint = None
         self.virtual_waypoint_history = []
         self.last_control = 0.0
@@ -55,6 +59,96 @@ class CollisionAvoidanceController:
     def normalize_angle(angle: float) -> float:
         """Normalize angle to [-π, π]"""
         return np.arctan2(np.sin(angle), np.cos(angle))
+
+    @staticmethod
+    def _point_in_polygon(px: float, py: float, vertices: List[Tuple[float, float]]) -> bool:
+        """
+        Check if point (px, py) is inside a polygon using ray casting algorithm.
+
+        Args:
+            px, py: Point to check
+            vertices: List of (x, y) polygon vertices
+
+        Returns:
+            True if point is inside polygon
+        """
+        if len(vertices) < 3:
+            return False
+
+        n = len(vertices)
+        inside = False
+
+        j = n - 1
+        for i in range(n):
+            xi, yi = vertices[i]
+            xj, yj = vertices[j]
+
+            if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+                inside = not inside
+            j = i
+
+        return inside
+
+    def _apply_v1_buffer(
+        self,
+        pos_x: float,
+        pos_y: float,
+        vx: float,
+        vy: float,
+        obstacles_list: Optional[List[Tuple[float, float, float, float]]] = None
+    ) -> Tuple[float, float]:
+        """
+        Apply buffer by moving V1 outward from polygon centroid.
+
+        Args:
+            pos_x, pos_y: Ship position
+            vx, vy: Original V1 position (a vertex of the unsafe set polygon)
+            obstacles_list: List of obstacles to get polygon vertices
+
+        Returns:
+            Tuple (buffered_vx, buffered_vy)
+        """
+        if self.v1_buffer <= 0:
+            return (vx, vy)
+
+        if not obstacles_list:
+            return (vx, vy)
+
+        # Get the polygon vertices
+        vertices = self.vertex_provider(pos_x, pos_y, obstacles_list, self.Cs)
+        if not vertices or len(vertices) < 3:
+            return (vx, vy)
+
+        # Compute polygon centroid
+        centroid_x = sum(v[0] for v in vertices) / len(vertices)
+        centroid_y = sum(v[1] for v in vertices) / len(vertices)
+
+        # Outward direction: from centroid to V1
+        outward = np.array([vx - centroid_x, vy - centroid_y])
+        outward_len = np.linalg.norm(outward)
+
+        if outward_len < 1e-6:
+            return (vx, vy)
+
+        outward = outward / outward_len
+
+        # Move outward by buffer amount
+        buffered_vx = vx + self.v1_buffer * outward[0]
+        buffered_vy = vy + self.v1_buffer * outward[1]
+
+        # Safety check: don't use buffer if it would place V1 inside polygon
+        if self._point_in_polygon(buffered_vx, buffered_vy, vertices):
+            return (vx, vy)
+
+        # Check if buffered point is closer to any obstacle than the original
+        for ox, oy, _, _ in obstacles_list:
+            orig_dist = np.sqrt((vx - ox)**2 + (vy - oy)**2)
+            buffered_dist = np.sqrt((buffered_vx - ox)**2 + (buffered_vy - oy)**2)
+            # Only reject if buffer moves V1 closer to obstacle
+            if buffered_dist < orig_dist - 0.1:
+                return (vx, vy)
+
+        return (buffered_vx, buffered_vy)
 
     @staticmethod
     def _default_vertex_provider(
@@ -136,6 +230,10 @@ class CollisionAvoidanceController:
                     best_score = score
                     best_vertex = (vx, vy)
 
+        # Apply starboard buffer if configured
+        if best_vertex is not None:
+            best_vertex = self._apply_v1_buffer(pos_x, pos_y, best_vertex[0], best_vertex[1], obstacles_list)
+
         return best_vertex
 
     def compute_V1_dynamic(
@@ -179,6 +277,10 @@ class CollisionAvoidanceController:
                 if relative_angle < best_angle:
                     best_angle = relative_angle
                     best_vertex = (vx, vy)
+
+        # Apply starboard buffer if configured
+        if best_vertex is not None:
+            best_vertex = self._apply_v1_buffer(pos_x, pos_y, best_vertex[0], best_vertex[1], obstacles_list)
 
         return best_vertex
 
