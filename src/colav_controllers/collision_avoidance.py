@@ -26,7 +26,7 @@ class CollisionAvoidanceController:
         tp: float,
         Cs: float,
         vertex_provider: Optional[Callable[
-            [float, float, List[Tuple[float, float, float, float]], float],
+            [float, float, List[Tuple[float, float, float, float]], float, float],
             Optional[List[Tuple[float, float]]]
         ]] = None,
         v1_buffer: float = 0.0
@@ -39,7 +39,7 @@ class CollisionAvoidanceController:
             tp: Prescribed time (seconds)
             Cs: Safe distance from obstacle (m)
             vertex_provider: Optional callable that returns unsafe set vertices.
-                Signature: (pos_x, pos_y, obstacles_list, Cs) -> List[(vx, vy)] or None
+                Signature: (pos_x, pos_y, obstacles_list, Cs, psi) -> List[(vx, vy)] or None
                 If None, uses simple circular obstacle approximation.
             v1_buffer: Buffer distance (m) to offset V1 to starboard for extra clearance.
                 Default 0.0 means no buffer.
@@ -95,7 +95,8 @@ class CollisionAvoidanceController:
         pos_y: float,
         vx: float,
         vy: float,
-        obstacles_list: Optional[List[Tuple[float, float, float, float]]] = None
+        obstacles_list: Optional[List[Tuple[float, float, float, float]]] = None,
+        psi: float = 0.0
     ) -> Tuple[float, float]:
         """
         Apply buffer by moving V1 outward from polygon centroid.
@@ -104,6 +105,7 @@ class CollisionAvoidanceController:
             pos_x, pos_y: Ship position
             vx, vy: Original V1 position (a vertex of the unsafe set polygon)
             obstacles_list: List of obstacles to get polygon vertices
+            psi: Ship heading (for vertex provider)
 
         Returns:
             Tuple (buffered_vx, buffered_vy)
@@ -115,7 +117,7 @@ class CollisionAvoidanceController:
             return (vx, vy)
 
         # Get the polygon vertices
-        vertices = self.vertex_provider(pos_x, pos_y, obstacles_list, self.Cs)
+        vertices = self.vertex_provider(pos_x, pos_y, obstacles_list, self.Cs, psi)
         if not vertices or len(vertices) < 3:
             return (vx, vy)
 
@@ -155,7 +157,8 @@ class CollisionAvoidanceController:
         pos_x: float,
         pos_y: float,
         obstacles_list: List[Tuple[float, float, float, float]],
-        Cs: float
+        Cs: float,
+        psi: float = 0.0
     ) -> Optional[List[Tuple[float, float]]]:
         """
         Default vertex provider using simple circular obstacle approximation.
@@ -208,7 +211,7 @@ class CollisionAvoidanceController:
             (v1_x, v1_y) or None
         """
         obstacles_list = [(ox, oy, 0.0, 0.0)]
-        vertices = self.vertex_provider(pos_x, pos_y, obstacles_list, self.Cs)
+        vertices = self.vertex_provider(pos_x, pos_y, obstacles_list, self.Cs, psi)
 
         if vertices is None or len(vertices) < 1:
             return None
@@ -232,7 +235,7 @@ class CollisionAvoidanceController:
 
         # Apply starboard buffer if configured
         if best_vertex is not None:
-            best_vertex = self._apply_v1_buffer(pos_x, pos_y, best_vertex[0], best_vertex[1], obstacles_list)
+            best_vertex = self._apply_v1_buffer(pos_x, pos_y, best_vertex[0], best_vertex[1], obstacles_list, psi)
 
         return best_vertex
 
@@ -260,7 +263,7 @@ class CollisionAvoidanceController:
         if not obstacles_list:
             return None
 
-        vertices = self.vertex_provider(pos_x, pos_y, obstacles_list, self.Cs)
+        vertices = self.vertex_provider(pos_x, pos_y, obstacles_list, self.Cs, psi)
 
         if not vertices or len(vertices) < 1:
             return None
@@ -280,7 +283,7 @@ class CollisionAvoidanceController:
 
         # Apply starboard buffer if configured
         if best_vertex is not None:
-            best_vertex = self._apply_v1_buffer(pos_x, pos_y, best_vertex[0], best_vertex[1], obstacles_list)
+            best_vertex = self._apply_v1_buffer(pos_x, pos_y, best_vertex[0], best_vertex[1], obstacles_list, psi)
 
         return best_vertex
 
@@ -358,16 +361,14 @@ class CollisionAvoidanceController:
     def compute_constant_dynamics(self, x: float, y: float, psi: float) -> np.ndarray:
         """
         Compute state derivatives for constant control mode.
-        Uses last_control as uc.
+        Maintains current heading for straight-line motion.
 
         Returns:
             np.array([dx/dt, dy/dt, dpsi/dt])
         """
-        uc = self.last_control
-
         dx_dt = self.v * np.cos(psi)
         dy_dt = self.v * np.sin(psi)
-        dpsi_dt = -self.a * psi + self.a * uc
+        dpsi_dt = 0.0  # Constant heading for straight motion
 
         return np.array([dx_dt, dy_dt, dpsi_dt])
 
