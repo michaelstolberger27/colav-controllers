@@ -5,6 +5,7 @@ Guarantees heading convergence to line-of-sight (LOS) in prescribed time tp.
 """
 
 import numpy as np
+from colav_controllers.utils import normalize_angle
 
 
 class PrescribedTimeController:
@@ -26,17 +27,12 @@ class PrescribedTimeController:
         self.eta = eta
         self.tp = tp
 
-    @staticmethod
-    def normalize_angle(angle: float) -> float:
-        """Normalize angle to [-π, π]"""
-        return np.arctan2(np.sin(angle), np.cos(angle))
-
     def compute_control(self, t: float, x: float, y: float, psi: float, xw: float, yw: float) -> float:
         """
         Prescribed-time control law.
 
-        u = (1/a)dot{psi}_dg + psi - η(psi - psi_dg)/(a(tp - t))  for t < tp
-        u = (1/a)dot{psi}_dg + psi                                for t >= tp
+        u = (1/a)dot{psi}_dg + psi - eta(psi - psi_dg)/(a(tp - t))  for t < tp
+        u = (1/a)dot{psi}_dg + psi                                   for t >= tp
 
         Args:
             t: Current time
@@ -47,10 +43,8 @@ class PrescribedTimeController:
         Returns:
             Control input u
         """
-        # Desired heading to waypoint
         psi_dg = np.arctan2(yw - y, xw - x)
 
-        # Heading derivative
         dx = xw - x
         dy = yw - y
         d_squared = dx**2 + dy**2
@@ -60,7 +54,7 @@ class PrescribedTimeController:
         else:
             psi_dg_dot = (-self.v * dx * np.sin(psi) + self.v * dy * np.cos(psi)) / d_squared
 
-        e = self.normalize_angle(psi - psi_dg)
+        e = normalize_angle(psi - psi_dg)
 
         if t < self.tp:
             time_varying_term = self.eta * e / (self.a * (self.tp - t + 1e-6))
