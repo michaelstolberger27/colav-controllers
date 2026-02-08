@@ -19,22 +19,6 @@ pip install -e .
 
 ## Quick Start
 
-### Straight Line Dynamics
-
-Simple helper for straight-line motion without control:
-
-```python
-import numpy as np
-from colav_controllers import compute_straight_line_dynamics
-
-# Get state derivatives [dx/dt, dy/dt, dpsi/dt] for straight-line motion
-v = 2.0  # Velocity (m/s)
-psi = np.radians(45)  # Heading (radians)
-
-dynamics = compute_straight_line_dynamics(v, psi)
-# Returns: [v*cos(psi), v*sin(psi), 0]
-```
-
 ### PrescribedTimeController
 
 Guarantees heading convergence to waypoint line-of-sight within prescribed time `tp`.
@@ -63,61 +47,21 @@ dynamics = controller.compute_dynamics(t, x, y, psi, waypoint_x, waypoint_y)
 u = controller.compute_control(t, x, y, psi, waypoint_x, waypoint_y)
 ```
 
-### CollisionAvoidanceController
+### Computing Virtual Waypoint V1
 
-COLREGs-compliant collision avoidance using virtual waypoint generation.
+V1 is the **starboard-most unsafe set vertex ahead of the ship**, used as an intermediate waypoint during collision avoidance.
 
 ```python
-from colav_controllers import CollisionAvoidanceController
+from colav_controllers import compute_v1, default_vertex_provider
 
-# Initialize controller
-controller = CollisionAvoidanceController(
-    a=1.0,          # Heading dynamics coefficient
-    v=2.0,          # Ship velocity (m/s)
-    eta=2.0,        # Controller gain (must be > 1)
-    tp=3.0,         # Prescribed time (seconds)
-    Cs=15.0,        # Safety distance from obstacles (m)
-    v1_buffer=0.0   # Optional: extra buffer distance for V1 (m)
-)
-
-# Obstacles as list of (x, y, velocity, heading) tuples
-# Note: velocity and heading currently not used in default implementation
 ship_x, ship_y, ship_psi = 0.0, 0.0, np.radians(30)
-obstacles = [(40.0, 25.0, 0.0, 0.0)]
+obstacles = [(40.0, 25.0, 0.0, 0.0)]  # (x, y, velocity, heading)
 
-# Compute and set virtual waypoint V1
-controller.set_virtual_waypoint(ship_x, ship_y, ship_psi, obstacles)
-
-# Compute dynamics
-dynamics = controller.compute_dynamics(t, ship_x, ship_y, ship_psi)
-```
-
-### Multiple Obstacles
-
-```python
-obstacles = [
-    (30.0, 15.0, 0.0, 0.0),
-    (50.0, 35.0, 0.0, 0.0),
-]
-
-# Same API for single or multiple obstacles
-controller.set_virtual_waypoint(ship_x, ship_y, ship_psi, obstacles)
-dynamics = controller.compute_dynamics(t, ship_x, ship_y, ship_psi)
-```
-
-### Computing Virtual Waypoint V1 Directly
-
-To compute V1 without storing it in the controller:
-
-```python
-from colav_controllers import compute_v1
-
-# Compute V1 with optional buffering
 v1 = compute_v1(
-    pos_x=ship_x, pos_y=ship_y, psi=ship_psi, 
+    pos_x=ship_x, pos_y=ship_y, psi=ship_psi,
     obstacles_list=obstacles, Cs=15.0,
     vertex_provider=default_vertex_provider,
-    buffer_distance=5.0  # Optional: apply 5m buffer
+    buffer_distance=5.0  # Optional: apply 5m outward buffer
 )
 
 if v1:
@@ -125,28 +69,47 @@ if v1:
     print(f"Virtual waypoint V1 at ({v1_x}, {v1_y})")
 ```
 
+### Unsafe Set Computation
+
+Generate dynamic unsafe regions around obstacles using DCPA/TCPA metrics:
+
+```python
+from colav_controllers import get_unsafe_set_vertices, create_los_cone, check_collision_threat
+
+obstacles = [
+    (30.0, 15.0, 2.0, np.radians(180)),  # Moving obstacle
+    (50.0, 35.0, 0.0, 0.0),               # Stationary obstacle
+]
+
+# Get convex hull vertices of dynamic unsafe set
+vertices = get_unsafe_set_vertices(
+    ship_x=0.0, ship_y=0.0,
+    obstacles_list=obstacles, Cs=15.0,
+    ship_psi=0.0, ship_v=12.0,
+    use_swept_region=True  # Predict future obstacle positions
+)
+
+# Check if any obstacle poses a collision threat
+threat = check_collision_threat(
+    pos_x=0.0, pos_y=0.0, psi=0.0,
+    obstacles_list=obstacles,
+    ship_v=12.0, Cs=15.0, dsafe=30.0
+)
+```
+
 ## Advanced Usage
 
 ### Understanding Virtual Waypoint Selection
 
-The collision avoidance controller selects V1 (the virtual waypoint) as the **starboard-most vertex ahead of the ship**:
-
-- Vertices are selected only if they are within ±90° of the ship's current heading ("ahead")
-- Among ahead vertices, the starboard-most (rightmost, negative relative angle) is selected
+The V1 selection algorithm:
+- Vertices are selected only if they are within +/-90 deg of the ship's current heading ("ahead")
+- Among ahead vertices, the starboard-most (most negative relative angle) is selected
 - This ensures COLREGs-compliant starboard avoidance
 - If no vertices are ahead, no virtual waypoint is computed
 
 ### V1 Buffer for Extra Clearance
 
-The `v1_buffer` parameter offsets the virtual waypoint V1 outward from the unsafe set polygon for additional safety margin:
-
-```python
-controller = CollisionAvoidanceController(
-    a=1.0, v=2.0, eta=2.0, tp=3.0,
-    Cs=15.0,        # Base safety distance
-    v1_buffer=5.0   # Additional 5m buffer
-)
-```
+The `buffer_distance` parameter offsets V1 outward from the unsafe set polygon centroid. The buffer is rejected if it would place V1 inside the polygon or closer to any obstacle.
 
 ### Custom Vertex Provider
 
@@ -168,43 +131,27 @@ def custom_vertex_provider(pos_x, pos_y, obstacles_list, Cs, psi):
     """
     vertices = []
     for ox, oy, _, _ in obstacles_list:
-        # Example: Square unsafe set
-        vertices.extend([
-            (ox + Cs, oy + Cs),
-            (ox - Cs, oy + Cs),
-            (ox - Cs, oy - Cs),
-            (ox + Cs, oy - Cs),
-        ])
+        for i in range(8):
+            angle = i * np.pi / 4
+            vertices.append((ox + Cs * np.cos(angle), oy + Cs * np.sin(angle)))
     return vertices if vertices else None
 
-# Use custom vertex provider
-controller = CollisionAvoidanceController(
-    a=1.0, v=2.0, eta=2.0, tp=3.0, Cs=15.0,
+v1 = compute_v1(
+    pos_x=0.0, pos_y=0.0, psi=0.0,
+    obstacles_list=obstacles, Cs=15.0,
     vertex_provider=custom_vertex_provider
 )
 ```
 
-## Examples
+### Swept Regions for Moving Obstacles
 
-Interactive Jupyter notebooks demonstrating the controllers are available in the `notebooks/` directory:
-
-- **[prescribed_time_demo.ipynb](notebooks/prescribed_time_demo.ipynb)** - Waypoint navigation with heading convergence guarantees
-- **[collision_avoidance_demo.ipynb](notebooks/collision_avoidance_demo.ipynb)** - Obstacle avoidance scenarios including:
-  - Single and multiple obstacle avoidance
-  - V1 buffer demonstration
-  - Custom vertex providers
-  - Two-phase navigation (avoidance + constant heading)
-
-To run the notebooks:
-
-```bash
-pip install jupyter matplotlib scipy
-jupyter notebook notebooks/
-```
+The `get_unsafe_set_vertices` function can predict future obstacle positions to create a "swept" region covering the obstacle's trajectory. This is controlled by the `use_swept_region` parameter:
+- `True`: Predicts positions at 50% and 100% of estimated maneuver time (use for V1 computation)
+- `False`: Uses current positions only (use for guard condition checks)
 
 ## Parameters
 
-### PrescribedTimeController Parameters
+### PrescribedTimeController
 
 | Parameter | Description | Units | Constraints |
 |-----------|-------------|-------|-------------|
@@ -213,16 +160,6 @@ jupyter notebook notebooks/
 | `eta` | Controller gain | - | > 1 (for guaranteed convergence) |
 | `tp` | Prescribed time | s | > 0 |
 
-### CollisionAvoidanceController Additional Parameters
-
-| Parameter | Description | Units | Default |
-|-----------|-------------|-------|---------|
-| `Cs` | Safety distance from obstacles | m | Required |
-| `v1_buffer` | Extra buffer for V1 waypoint | m | 0.0 |
-| `vertex_provider` | Custom unsafe set vertex function | callable | `None` (uses default 8-vertex circular) |
-
-Inherits `a`, `v`, `eta`, `tp` from PrescribedTimeController.
-
 ## Algorithm Details
 
 ### Prescribed-Time Control
@@ -230,30 +167,28 @@ Inherits `a`, `v`, `eta`, `tp` from PrescribedTimeController.
 The controller implements a time-varying control law:
 
 ```
-u = (1/a)·ψ̇_dg + ψ - η·e/(a·(tp - t))    for t < tp
-u = (1/a)·ψ̇_dg + ψ                        for t ≥ tp
+u = (1/a)*psi_dg_dot + psi - eta*e/(a*(tp - t))    for t < tp
+u = (1/a)*psi_dg_dot + psi                          for t >= tp
 ```
 
 where:
-- `e = normalize_angle(ψ - ψ_dg)` is the heading error (normalized to [-π, π])
-- `ψ_dg = atan2(yw - y, xw - x)` is the desired heading (line-of-sight to waypoint)
-- `ψ_dg_dot` is the time derivative of desired heading
+- `e = atan2(sin(psi - psi_dg), cos(psi - psi_dg))` is the heading error (normalized to [-pi, pi])
+- `psi_dg = atan2(yw - y, xw - x)` is the desired heading (line-of-sight to waypoint)
+- `psi_dg_dot` is the time derivative of desired heading
 
-As t approaches tp, the time-varying term η·e/(a·(tp - t)) increases, driving rapid convergence.
+As t approaches tp, the time-varying term drives rapid convergence.
 
 ### Collision Avoidance
 
 1. **Unsafe Set Generation**: Create vertices around obstacles using `vertex_provider`
    - Default: 8 vertices in circular pattern at distance `Cs` from each obstacle
-   - Custom: User can provide custom vertex provider function
+   - Dynamic: `get_unsafe_set_vertices` uses `colav_unsafe_set` for DCPA/TCPA-based regions
 
 2. **V1 Selection**: Choose starboard-most vertex ahead of ship
-   - Filter vertices to those within ±π/2 of ship heading
+   - Filter vertices to those within +/-pi/2 of ship heading
    - Among ahead vertices, select the one with most negative (starboard) relative angle
-   - Returns None if no vertices are ahead
 
 3. **V1 Buffering** (optional): Offset V1 outward from polygon centroid
-   - Buffer distance controlled by `v1_buffer` parameter
    - Rejected if buffer would place V1 inside polygon or closer to obstacles
 
 4. **Prescribed-Time Navigation**: Use prescribed-time control to navigate to V1
@@ -262,58 +197,39 @@ As t approaches tp, the time-varying term η·e/(a·(tp - t)) increases, driving
 
 ### PrescribedTimeController
 
-**Methods:**
-- `compute_control(t, x, y, psi, xw, yw)` → float: Returns control input u
-- `compute_dynamics(t, x, y, psi, xw, yw)` → ndarray: Returns [dx/dt, dy/dt, dpsi/dt]
+- `compute_control(t, x, y, psi, xw, yw)` -> float: Returns control input u
+- `compute_dynamics(t, x, y, psi, xw, yw)` -> ndarray: Returns [dx/dt, dy/dt, dpsi/dt]
 - `reset()`: No-op (stateless controller)
 
-### CollisionAvoidanceController
+### Virtual Waypoint (virtual_waypoint)
 
-**Methods:**
-- `set_virtual_waypoint(pos_x, pos_y, psi, obstacles_list)`: Compute and store V1
-- `compute_dynamics(t, x, y, psi)` → ndarray: Returns [dx/dt, dy/dt, dpsi/dt] (requires V1 set)
+- `compute_v1(pos_x, pos_y, psi, obstacles_list, Cs, vertex_provider, buffer_distance=0)` -> (float, float) or None: Select starboard-most vertex ahead with optional buffering
+- `default_vertex_provider(pos_x, pos_y, obstacles_list, Cs, psi)` -> [(float, float)] or None: Generate 8-vertex circular unsafe sets
 
-### Geometry Module (utils.geometry)
+### Unsafe Sets (unsafe_sets)
 
-Low-level geometric utilities for polygon operations:
-
-- `point_in_polygon(px, py, vertices)` → bool: Ray-casting point-in-polygon test
-- `polygon_centroid(vertices)` → (float, float): Compute polygon center
-- `offset_point_from_centroid(px, py, cx, cy, distance)` → (float, float): Move point outward from centroid
-- `distance_to_point(p1_x, p1_y, p2_x, p2_y)` → float: Euclidean distance
-
-### Virtual Waypoint Module (utils.virtual_waypoint)
-
-Virtual waypoint computation and buffering:
-
-- `compute_v1(pos_x, pos_y, psi, obstacles, Cs, vertex_provider, buffer_distance=0)` → (float, float) or None: Select starboard-most vertex ahead with optional buffering
-- `apply_v1_buffer(v1_x, v1_y, vertices, obstacles, buffer_distance, Cs)` → (float, float): Apply safety buffer with rejection checks
-- `default_vertex_provider(pos_x, pos_y, obstacles, Cs, psi)` → [(float, float)] or None: Generate 8-vertex circular unsafe sets
-
-### Utility Functions (utils.helpers)
-
-- `compute_straight_line_dynamics(v, psi)` → ndarray: Returns [v*cos(psi), v*sin(psi), 0]
-- `normalize_angle(angle)` → float: Normalizes angle to [-π, π]
+- `get_unsafe_set_vertices(ship_x, ship_y, obstacles_list, Cs, dsf=None, ship_psi=0, ship_v=12, use_swept_region=True)` -> List[List[float]] or None: Generate dynamic unsafe set vertices via `colav_unsafe_set`
+- `create_los_cone(pos_x, pos_y, xw, yw, v, tp)` -> Polygon: Create LOS cone F(p(t)) = conv(B_2(p(t), v*tp), pw)
+- `compute_unified_unsafe_region(pos_x, pos_y, obstacles_list, Cs, ship_psi=0, ship_v=12)` -> Polygon or None: Unified unsafe region from all obstacles
+- `check_collision_threat(pos_x, pos_y, psi, obstacles_list, ship_v, Cs, dsafe)` -> bool: Check if any obstacle threatens collision using DCPA/TCPA
 
 ## Architecture
 
-### Module Organization
-
 ```
 colav_controllers/
-├── collision_avoidance.py     Main controller orchestrating avoidance logic
-├── prescribed_time.py         Prescribed-time heading control law
-└── utils/
-    ├── geometry.py            Geometric utilities (polygon operations, point tests)
-    ├── helpers.py             Shared utilities (angle normalization, dynamics)
-    └── virtual_waypoint.py    V1 selection algorithm and buffering
+├── __init__.py             Public API (8 exports)
+├── __about__.py            Package version
+├── prescribed_time.py      Prescribed-time heading control law
+├── virtual_waypoint.py     V1 selection algorithm and buffering
+└── unsafe_sets.py          Dynamic unsafe sets, LOS cones, collision checks
 ```
 
 ## Dependencies
 
 - `numpy>=1.20`
+- `shapely` - Polygon intersection for LOS cone checks
+- `colav_unsafe_set` - Dynamic unsafe set computation (DCPA/TCPA)
 
 Development/examples require:
 - `scipy` - For ODE integration in examples
-- `matplotlib` - For visualization in notebooks
-
+- `matplotlib` - For visualization

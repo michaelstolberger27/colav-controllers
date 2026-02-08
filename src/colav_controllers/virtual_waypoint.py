@@ -1,18 +1,68 @@
 """
-Virtual waypoint computation and buffering for collision avoidance.
+Virtual waypoint computation for COLREGs-compliant collision avoidance.
 
-Handles V1 selection from unsafe set vertices and optional buffering.
+Selects V1 (starboard-most unsafe set vertex ahead of ship) and applies
+optional buffering for extra safety margin.
 """
 
 from typing import List, Tuple, Optional, Callable
 import numpy as np
-from colav_controllers.utils.helpers import normalize_angle
-from colav_controllers.utils.geometry import (
-    point_in_polygon,
-    polygon_centroid,
-    offset_point_from_centroid,
-    distance_to_point,
-)
+
+
+def _normalize_angle(angle: float) -> float:
+    """Normalize angle to [-pi, pi]."""
+    return np.arctan2(np.sin(angle), np.cos(angle))
+
+
+def _point_in_polygon(px: float, py: float, vertices: List[Tuple[float, float]]) -> bool:
+    """Check if point (px, py) is inside a polygon using ray casting."""
+    if len(vertices) < 3:
+        return False
+
+    n = len(vertices)
+    inside = False
+
+    j = n - 1
+    for i in range(n):
+        xi, yi = vertices[i]
+        xj, yj = vertices[j]
+
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+
+    return inside
+
+
+def _polygon_centroid(vertices: List[Tuple[float, float]]) -> Tuple[float, float]:
+    """Compute centroid (geometric center) of a polygon."""
+    if not vertices:
+        return (0.0, 0.0)
+
+    centroid_x = sum(v[0] for v in vertices) / len(vertices)
+    centroid_y = sum(v[1] for v in vertices) / len(vertices)
+    return (centroid_x, centroid_y)
+
+
+def _offset_point_from_centroid(
+    point_x: float,
+    point_y: float,
+    centroid_x: float,
+    centroid_y: float,
+    offset_distance: float
+) -> Tuple[float, float]:
+    """Move a point outward from a centroid by a specified distance."""
+    outward = np.array([point_x - centroid_x, point_y - centroid_y])
+    outward_len = np.linalg.norm(outward)
+
+    if outward_len < 1e-6:
+        return (point_x, point_y)
+
+    outward_normalized = outward / outward_len
+    new_x = point_x + offset_distance * outward_normalized[0]
+    new_y = point_y + offset_distance * outward_normalized[1]
+
+    return (new_x, new_y)
 
 
 def default_vertex_provider(
@@ -25,14 +75,13 @@ def default_vertex_provider(
     """
     Default vertex provider using circular obstacle approximation.
 
-    Creates 8 vertices around each obstacle at distance Cs, representing
-    the unsafe set boundary.
+    Creates 8 vertices around each obstacle at distance Cs.
 
     Args:
-        pos_x, pos_y: Ship position (currently unused in circular approximation)
+        pos_x, pos_y: Ship position (unused in circular approximation)
         obstacles_list: List of (ox, oy, ov, o_psi) tuples
         Cs: Safety radius around obstacles
-        psi: Ship heading (currently unused in circular approximation)
+        psi: Ship heading (unused in circular approximation)
 
     Returns:
         List of (vx, vy) vertices or None if no obstacles
@@ -65,7 +114,7 @@ def compute_v1(
     Compute virtual waypoint V1 (starboard-most vertex ahead of ship).
 
     Selects the unsafe set vertex that is:
-    1. Within ±90° of ship heading ("ahead")
+    1. Within +/-90 deg of ship heading ("ahead")
     2. Starboard-most (most negative relative angle among ahead vertices)
     3. Optionally applies outward buffer for extra safety margin
 
@@ -91,14 +140,12 @@ def compute_v1(
     best_angle = np.inf
 
     for vx, vy in vertices:
-        # Angle from ship to vertex
         angle_to_vertex = np.arctan2(vy - pos_y, vx - pos_x)
-        # Angle relative to ship heading
-        relative_angle = normalize_angle(angle_to_vertex - psi)
+        relative_angle = _normalize_angle(angle_to_vertex - psi)
 
-        # Filter: only vertices ahead (within ±π/2 of heading)
+        # Only vertices ahead (within +/-pi/2 of heading)
         if -np.pi/2 < relative_angle < np.pi/2:
-            # Among ahead vertices, prefer starboard (most negative angle)
+            # Prefer starboard (most negative angle)
             if relative_angle < best_angle:
                 best_angle = relative_angle
                 best_vertex = (vx, vy)
@@ -106,23 +153,21 @@ def compute_v1(
     if best_vertex is None:
         return None
 
-    # Apply buffering if configured
     if buffer_distance > 0:
-        best_vertex = apply_v1_buffer(
-            best_vertex[0], best_vertex[1], vertices, obstacles_list, 
-            buffer_distance, Cs
+        best_vertex = _apply_v1_buffer(
+            best_vertex[0], best_vertex[1], vertices, obstacles_list,
+            buffer_distance
         )
 
     return best_vertex
 
 
-def apply_v1_buffer(
+def _apply_v1_buffer(
     v1_x: float,
     v1_y: float,
     vertices: List[Tuple[float, float]],
     obstacles_list: List[Tuple[float, float, float, float]],
     buffer_distance: float,
-    Cs: float
 ) -> Tuple[float, float]:
     """
     Apply buffer to V1 by moving it outward from polygon centroid.
@@ -130,37 +175,27 @@ def apply_v1_buffer(
     The buffer is rejected (original V1 returned) if:
     - Buffered V1 would be inside the unsafe polygon
     - Buffered V1 would be closer to any obstacle than original V1
-
-    Args:
-        v1_x, v1_y: Original virtual waypoint position
-        vertices: Unsafe set polygon vertices
-        obstacles_list: List of obstacles
-        buffer_distance: Distance to offset V1 outward
-        Cs: Safety distance (used for rejection checks)
-
-    Returns:
-        Tuple (final_v1_x, final_v1_y)
     """
     if buffer_distance <= 0 or not vertices or len(vertices) < 3:
         return (v1_x, v1_y)
 
-    centroid_x, centroid_y = polygon_centroid(vertices)
-    buffered_x, buffered_y = offset_point_from_centroid(
+    centroid_x, centroid_y = _polygon_centroid(vertices)
+    buffered_x, buffered_y = _offset_point_from_centroid(
         v1_x, v1_y, centroid_x, centroid_y, buffer_distance
     )
 
-    # Reject if buffered point is same as original (offset failed)
+    # Reject if offset failed
     if (buffered_x, buffered_y) == (v1_x, v1_y):
         return (v1_x, v1_y)
 
     # Reject if buffered V1 would be inside polygon
-    if point_in_polygon(buffered_x, buffered_y, vertices):
+    if _point_in_polygon(buffered_x, buffered_y, vertices):
         return (v1_x, v1_y)
 
     # Reject if buffered V1 is closer to any obstacle
     for ox, oy, _, _ in obstacles_list:
-        orig_dist = distance_to_point(v1_x, v1_y, ox, oy)
-        buffered_dist = distance_to_point(buffered_x, buffered_y, ox, oy)
+        orig_dist = np.hypot(v1_x - ox, v1_y - oy)
+        buffered_dist = np.hypot(buffered_x - ox, buffered_y - oy)
         if buffered_dist < orig_dist - 0.1:
             return (v1_x, v1_y)
 

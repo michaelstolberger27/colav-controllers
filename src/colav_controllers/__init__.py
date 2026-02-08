@@ -4,31 +4,22 @@ COLREGs-compliant collision avoidance.
 """
 
 from colav_controllers.__about__ import __version__
-from colav_controllers.utils import (
-    normalize_angle,
-    compute_straight_line_dynamics,
-    point_in_polygon,
-    polygon_centroid,
-    offset_point_from_centroid,
-    distance_to_point,
-    default_vertex_provider,
-    compute_v1,
-    apply_v1_buffer,
-)
 from colav_controllers.prescribed_time import PrescribedTimeController
-from colav_controllers.collision_avoidance import CollisionAvoidanceController
+from colav_controllers.virtual_waypoint import compute_v1, default_vertex_provider
+from colav_controllers.unsafe_sets import (
+    get_unsafe_set_vertices,
+    create_los_cone,
+    compute_unified_unsafe_region,
+    check_collision_threat,
+)
 
 __all__ = [
     "__version__",
-    "normalize_angle",
-    "compute_straight_line_dynamics",
     "PrescribedTimeController",
-    "CollisionAvoidanceController",
-    "point_in_polygon",
-    "polygon_centroid",
-    "offset_point_from_centroid",
-    "distance_to_point",
-    "default_vertex_provider",
     "compute_v1",
-    "apply_v1_buffer",
+    "default_vertex_provider",
+    "get_unsafe_set_vertices",
+    "create_los_cone",
+    "compute_unified_unsafe_region",
+    "check_collision_threat",
 ]
