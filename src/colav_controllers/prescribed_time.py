@@ -5,7 +5,6 @@ Guarantees heading convergence to line-of-sight (LOS) in prescribed time tp.
 """
 
 import numpy as np
-from colav_controllers.utils import normalize_angle
 
 
 class PrescribedTimeController:
@@ -54,7 +53,7 @@ class PrescribedTimeController:
         else:
             psi_dg_dot = (-self.v * dx * np.sin(psi) + self.v * dy * np.cos(psi)) / d_squared
 
-        e = normalize_angle(psi - psi_dg)
+        e = np.arctan2(np.sin(psi - psi_dg), np.cos(psi - psi_dg))
 
         if t < self.tp:
             time_varying_term = self.eta * e / (self.a * (self.tp - t + 1e-6))
